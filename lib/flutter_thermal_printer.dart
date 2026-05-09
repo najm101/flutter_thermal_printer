@@ -7,13 +7,16 @@ import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 import 'package:screenshot/screenshot.dart';
 
+import 'flutter_thermal_printer_platform_interface.dart';
 import 'printer_manager.dart';
 import 'utils/ble_config.dart';
 import 'utils/printer.dart';
+import 'utils/printer_status.dart';
 
 export 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 export 'package:flutter_thermal_printer/network/network_printer.dart';
 export 'package:flutter_thermal_printer/utils/ble_config.dart';
+export 'package:flutter_thermal_printer/utils/printer_status.dart';
 export 'package:universal_ble/universal_ble.dart';
 
 /// Main class for thermal printer operations across all platforms
@@ -144,6 +147,16 @@ class FlutterThermalPrinter {
 
   /// Check if Bluetooth is turned on
   Future<bool> isBleTurnedOn() async => PrinterManager.instance.isBleTurnedOn();
+
+  /// Get printer status (online, paper level) — USB only, one-shot
+  Future<PrinterStatus> getPrinterStatus(Printer device) =>
+      FlutterThermalPrinterPlatform.instance.getPrinterStatus(device);
+
+  /// Stream of printer status — USB only, only emits when status changes.
+  /// [useAsb] true = printer pushes status automatically (ASB mode, requires printer support).
+  /// [useAsb] false = poll every 3 seconds (default, works on all printers).
+  Stream<PrinterStatus> printerStatusStream(Printer device, {bool useAsb = false}) =>
+      FlutterThermalPrinterPlatform.instance.printerStatusStream(device, useAsb: useAsb);
 
   // ==========================================================================
   // ADVANCED PRINTING METHODS

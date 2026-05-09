@@ -5,6 +5,7 @@ import android.content.Context;
 import androidx.annotation.NonNull;
 
 import java.util.List;
+import java.util.Map;
 
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.plugin.common.MethodCall;
@@ -15,12 +16,9 @@ import io.flutter.plugin.common.EventChannel;
 
 /** FlutterThermalPrinterPlugin */
 public class FlutterThermalPrinterPlugin implements FlutterPlugin, MethodCallHandler {
-  /// The MethodChannel that will the communication between Flutter and native Android
-  ///
-  /// This local reference serves to register the plugin with the Flutter Engine and unregister it
-  /// when the Flutter Engine is detached from the Activity
   private MethodChannel channel;
   private EventChannel eventChannel;
+  private EventChannel statusEventChannel;
   private Context context;
   private UsbPrinter usbPrinter;
 
@@ -28,10 +26,35 @@ public class FlutterThermalPrinterPlugin implements FlutterPlugin, MethodCallHan
   public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
     channel = new MethodChannel(flutterPluginBinding.getBinaryMessenger(), "flutter_thermal_printer");
     eventChannel = new EventChannel(flutterPluginBinding.getBinaryMessenger(), "flutter_thermal_printer/events");
+    statusEventChannel = new EventChannel(flutterPluginBinding.getBinaryMessenger(), "flutter_thermal_printer/status");
+
     channel.setMethodCallHandler(this);
     context = flutterPluginBinding.getApplicationContext();
-    usbPrinter = new UsbPrinter(context); 
+    usbPrinter = new UsbPrinter(context);
     eventChannel.setStreamHandler(usbPrinter);
+
+    statusEventChannel.setStreamHandler(new EventChannel.StreamHandler() {
+      @Override
+      public void onListen(Object arguments, EventChannel.EventSink events) {
+        if (arguments instanceof Map) {
+          Map<?, ?> args = (Map<?, ?>) arguments;
+          String vendorId = (String) args.get("vendorId");
+          String productId = (String) args.get("productId");
+          Boolean useAsb = (Boolean) args.get("useAsb");
+          usbPrinter.startStatusStream(vendorId, productId, Boolean.TRUE.equals(useAsb), events);
+        }
+      }
+
+      @Override
+      public void onCancel(Object arguments) {
+        if (arguments instanceof Map) {
+          Map<?, ?> args = (Map<?, ?>) arguments;
+          String vendorId = (String) args.get("vendorId");
+          String productId = (String) args.get("productId");
+          usbPrinter.stopStatusStream(vendorId, productId);
+        }
+      }
+    });
   }
 
   @Override
@@ -47,7 +70,7 @@ public class FlutterThermalPrinterPlugin implements FlutterPlugin, MethodCallHan
               String vendorId = call.argument("vendorId");
               String productId = call.argument("productId");
               usbPrinter.connect(vendorId, productId);
-              result.success(false  );
+              result.success(false);
               break;
           }
           case "disconnect": {
@@ -70,6 +93,12 @@ public class FlutterThermalPrinterPlugin implements FlutterPlugin, MethodCallHan
               result.success(usbPrinter.isConnected(vendorId, productId));
               break;
           }
+          case "getPrinterStatus": {
+              String vendorId = call.argument("vendorId");
+              String productId = call.argument("productId");
+              result.success(usbPrinter.getPrinterStatus(vendorId, productId));
+              break;
+          }
           default:
               result.notImplemented();
               break;
@@ -79,5 +108,6 @@ public class FlutterThermalPrinterPlugin implements FlutterPlugin, MethodCallHan
   @Override
   public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
     channel.setMethodCallHandler(null);
+    statusEventChannel.setStreamHandler(null);
   }
 }

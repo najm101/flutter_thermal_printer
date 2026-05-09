@@ -72,4 +72,5 @@
         "xtree": "cpp",
         "xutility": "cpp"
     },
+    "java.configuration.updateBuildConfiguration": "interactive",
 }

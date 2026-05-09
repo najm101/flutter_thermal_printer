@@ -197,6 +197,31 @@ class _MyAppState extends State<MyApp> {
                       title: Text(printers[index].name ?? 'No Name'),
                       subtitle: Text(
                           "Connected: ${printers[index].isConnected ?? false}"),
+                      leading: StreamBuilder(
+                          stream: _flutterThermalPrinterPlugin
+                              .printerStatusStream(printers[index],
+                                  useAsb: true),
+                          builder: (context, snapshot) {
+                            print(
+                                "${DateTime.now()} ${snapshot.data?.toJson()}");
+                            if (snapshot.hasData) {
+                              return Icon(
+                                snapshot.data?.isOnline == true
+                                    ? Icons.check_circle
+                                    : Icons.cancel,
+                                color: snapshot.data?.isOnline == true
+                                    ? Colors.green
+                                    : Colors.red,
+                              );
+                            } else {
+                              return const SizedBox(
+                                width: 24,
+                                height: 24,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              );
+                            }
+                          }),
                       trailing: IconButton(
                         icon: const Icon(Icons.connect_without_contact),
                         onPressed: () async {

@@ -4,6 +4,7 @@ import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 import 'flutter_thermal_printer_method_channel.dart';
 import 'utils/printer.dart';
+import 'utils/printer_status.dart';
 
 abstract class FlutterThermalPrinterPlatform extends PlatformInterface {
   FlutterThermalPrinterPlatform() : super(token: _token);
@@ -45,6 +46,14 @@ abstract class FlutterThermalPrinterPlatform extends PlatformInterface {
 
   Future<bool> disconnect(Printer device) {
     throw UnimplementedError('disconnect() has not been implemented.');
+  }
+
+  Future<PrinterStatus> getPrinterStatus(Printer device) {
+    throw UnimplementedError('getPrinterStatus() has not been implemented.');
+  }
+
+  Stream<PrinterStatus> printerStatusStream(Printer device, {bool useAsb = false}) {
+    throw UnimplementedError('printerStatusStream() has not been implemented.');
   }
 
   Future<void> stopScan() {
