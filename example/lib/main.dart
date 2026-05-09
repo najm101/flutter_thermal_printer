@@ -38,13 +38,20 @@ class _MyAppState extends State<MyApp> {
     ]);
     _devicesStreamSubscription = _flutterThermalPrinterPlugin.devicesStream
         .listen((List<Printer> event) {
-      setState(() {
-        printers = event;
-        printers.removeWhere((element) =>
-            element.name == null ||
-            element.name == '' ||
-            element.name!.toLowerCase().contains("print") == false);
-      });
+      final filtered = event
+          .where((e) =>
+              e.name != null &&
+              e.name != '' &&
+              e.name!.toLowerCase().contains("print"))
+          .toList();
+      final changed = filtered.length != printers.length ||
+          filtered.any((p) => !printers.any(
+              (existing) => existing.vendorId == p.vendorId && existing.productId == p.productId));
+      if (changed) {
+        setState(() {
+          printers = filtered;
+        });
+      }
     });
   }
 
@@ -202,8 +209,6 @@ class _MyAppState extends State<MyApp> {
                               .printerStatusStream(printers[index],
                                   useAsb: true),
                           builder: (context, snapshot) {
-                            print(
-                                "${DateTime.now()} ${snapshot.data?.toJson()}");
                             if (snapshot.hasData) {
                               return Icon(
                                 snapshot.data?.isOnline == true
