@@ -28,6 +28,8 @@
     <usb-device vendor-id="12879" product-id="210" />
     <!-- Epson office Printer -->
     <usb-device vendor-id="1155" product-id="22339" />
+    <!-- USB Printer Port (vendorId=1155 / 0x0483, productId=1803 / 0x070B) -->
+    <usb-device vendor-id="1155" product-id="1803" />
     <!-- Caller ID -->
     <usb-device vendor-id="4660" product-id="1" />
 </resources>

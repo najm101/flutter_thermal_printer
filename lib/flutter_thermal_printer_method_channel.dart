@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'flutter_thermal_printer_platform_interface.dart';
+import 'utils/print_result.dart';
 import 'utils/printer.dart';
 import 'utils/printer_status.dart';
 
@@ -37,18 +38,42 @@ class MethodChannelFlutterThermalPrinter extends FlutterThermalPrinterPlatform {
       await methodChannel.invokeMethod('connect', device.toJson());
 
   @override
-  Future<bool> printText(
+  Future<PrintResult> printText(
     Printer device,
     Uint8List data, {
     String? path,
-  }) async =>
-      await methodChannel.invokeMethod('printText', {
+  }) async {
+    try {
+      final result = await methodChannel.invokeMapMethod<dynamic, dynamic>(
+        'printText',
+        {
+          'vendorId': device.vendorId.toString(),
+          'productId': device.productId.toString(),
+          'name': device.name,
+          'data': List<int>.from(data),
+          'path': path ?? '',
+        },
+      );
+      return PrintResult.fromMap(result ?? {'success': false, 'errorCode': 'unknown', 'message': 'null result'});
+    } on PlatformException catch (e) {
+      return PrintResult.failure(PrintErrorCode.platformException, e.message ?? e.code);
+    } catch (e) {
+      return PrintResult.failure(PrintErrorCode.unknown, e.toString());
+    }
+  }
+
+  @override
+  Future<bool> resetPrinter(Printer device) async {
+    try {
+      final result = await methodChannel.invokeMethod<bool>('resetPrinter', {
         'vendorId': device.vendorId.toString(),
         'productId': device.productId.toString(),
-        'name': device.name,
-        'data': List<int>.from(data),
-        'path': path ?? '',
       });
+      return result ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
 
   @override
   Future<bool> isConnected(Printer device) async =>

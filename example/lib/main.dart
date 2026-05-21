@@ -45,8 +45,9 @@ class _MyAppState extends State<MyApp> {
               e.name!.toLowerCase().contains("print"))
           .toList();
       final changed = filtered.length != printers.length ||
-          filtered.any((p) => !printers.any(
-              (existing) => existing.vendorId == p.vendorId && existing.productId == p.productId));
+          filtered.any((p) => !printers.any((existing) =>
+              existing.vendorId == p.vendorId &&
+              existing.productId == p.productId));
       if (changed) {
         setState(() {
           printers = filtered;
@@ -228,26 +229,45 @@ class _MyAppState extends State<MyApp> {
                             }
                           }),
                       trailing: IconButton(
-                        icon: const Icon(Icons.connect_without_contact),
+                        icon: const Icon(Icons.print),
                         onPressed: () async {
-                          // final data = await _generateReceipt(
-                          //   type: printers[index].connectionTypeString,
-                          // );
-                          // await _flutterThermalPrinterPlugin.printData(
-                          //   printers[index],
-                          //   data,
-                          //   longData: true,
-                          // );
-
-                          await _flutterThermalPrinterPlugin.printWidget(
-                            context,
-                            printOnBle: true,
-                            cutAfterPrinted: true,
-                            printer: printers[index],
-                            widget: receiptWidget(
-                              printers[index].connectionTypeString,
-                            ),
+                          final data = await _generateReceipt(
+                            type: printers[index].connectionTypeString,
                           );
+                          final result =
+                              await _flutterThermalPrinterPlugin.printData(
+                            printers[index],
+                            data,
+                            longData: true,
+                          );
+                          debugPrint(
+                            result.toString()
+                          );
+                          if (context.mounted) {
+                            final msg = result.success
+                                ? 'Printed ${result.bytesWritten} bytes ✓'
+                                : switch (result.errorCode) {
+                                    PrintErrorCode.coverOpen =>
+                                      'Cover is open — close it and try again',
+                                    PrintErrorCode.noPaper =>
+                                      'Out of paper',
+                                    PrintErrorCode.printerOffline =>
+                                      'Printer is offline',
+                                    PrintErrorCode.notConnected =>
+                                      'Not connected — tap to connect first',
+                                    PrintErrorCode.writeTimeout =>
+                                      'Write timed out',
+                                    _ =>
+                                      'Print failed: ${result.errorCode?.name} — ${result.message}',
+                                  };
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                backgroundColor:
+                                    result.success ? Colors.green : Colors.red,
+                                content: Text(msg),
+                              ),
+                            );
+                          }
                         },
                       ),
                     );

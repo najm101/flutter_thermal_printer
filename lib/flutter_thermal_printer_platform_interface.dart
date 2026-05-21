@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 import 'flutter_thermal_printer_method_channel.dart';
+import 'utils/print_result.dart';
 import 'utils/printer.dart';
 import 'utils/printer_status.dart';
 
@@ -30,8 +31,12 @@ abstract class FlutterThermalPrinterPlatform extends PlatformInterface {
     throw UnimplementedError('connect() has not been implemented.');
   }
 
-  Future<void> printText(Printer device, Uint8List data, {String? path}) {
+  Future<PrintResult> printText(Printer device, Uint8List data, {String? path}) {
     throw UnimplementedError('printText() has not been implemented.');
+  }
+
+  Future<bool> resetPrinter(Printer device) {
+    throw UnimplementedError('resetPrinter() has not been implemented.');
   }
 
   Future<bool> isConnected(Printer device) {

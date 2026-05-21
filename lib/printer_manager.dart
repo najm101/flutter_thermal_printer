@@ -11,6 +11,7 @@ import 'Windows/windows_platform.dart'
     if (dart.library.html) 'Windows/windows_stub.dart';
 import 'flutter_thermal_printer_platform_interface.dart';
 import 'utils/ble_config.dart';
+import 'utils/print_result.dart';
 import 'utils/printer.dart';
 
 /// Universal printer manager for all platforms
@@ -221,7 +222,7 @@ class PrinterManager {
   }
 
   /// Print data to printer device
-  Future<void> printData(
+  Future<PrintResult> printData(
     Printer printer,
     List<int> bytes, {
     bool longData = false,
@@ -229,22 +230,20 @@ class PrinterManager {
   }) async {
     if (printer.connectionType == ConnectionType.USB) {
       if (Platform.isWindows) {
-        // Windows USB printing using Win32 API
-        using((alloc) {
-          RawPrinter(printer.name!, alloc).printEscPosWin32(bytes);
-        });
-        return;
-      } else {
-        // Non-Windows USB printing
         try {
-          await FlutterThermalPrinterPlatform.instance.printText(
-            printer,
-            Uint8List.fromList(bytes),
-            path: printer.address,
-          );
+          using((alloc) {
+            RawPrinter(printer.name!, alloc).printEscPosWin32(bytes);
+          });
+          return PrintResult.ok(bytes.length);
         } catch (e) {
-          log('FlutterThermalPrinter: Unable to Print Data $e');
+          return PrintResult.failure(PrintErrorCode.unknown, e.toString());
         }
+      } else {
+        return FlutterThermalPrinterPlatform.instance.printText(
+          printer,
+          Uint8List.fromList(bytes),
+          path: printer.address,
+        );
       }
     } else if (printer.connectionType == ConnectionType.BLE) {
       try {
@@ -263,40 +262,42 @@ class PrinterManager {
         }
 
         if (writeCharacteristic == null) {
-          log('No write characteristic found');
-          return;
+          return PrintResult.failure(PrintErrorCode.notConnected, 'No write characteristic found');
         }
+
         final mtu = chunkSize ??
             (Platform.isWindows
                 ? 50
                 : await printer.requestMtu(Platform.isMacOS ? 150 : 500));
         final maxChunkSize = mtu - 3;
+        var totalWritten = 0;
 
         for (var i = 0; i < bytes.length; i += maxChunkSize) {
           final chunk = bytes.sublist(
             i,
             i + maxChunkSize > bytes.length ? bytes.length : i + maxChunkSize,
           );
-
-          await writeCharacteristic.write(
-            Uint8List.fromList(chunk),
-          );
-
-          // Small delay between chunks to avoid overwhelming the device
+          await writeCharacteristic.write(Uint8List.fromList(chunk));
+          totalWritten += chunk.length;
           if (longData) {
             await Future.delayed(const Duration(milliseconds: 10));
           }
-
-          ///
-          /// [refreshDuration] The duration between each scan refresh.
-          /// [connectionTypes] List of connection types to scan for (BLE, USB).
-          /// [androidUsesFineLocation] Whether to use fine location on Android for BLE scanning.
         }
-        return;
+        return PrintResult.ok(totalWritten);
       } catch (e) {
-        log('Failed to print data to device $e');
+        return PrintResult.failure(PrintErrorCode.unknown, e.toString());
       }
     }
+    return PrintResult.failure(PrintErrorCode.unknown, 'Unsupported connection type');
+  }
+
+  /// Send ESC @ to reset printer state (clears formatting, partial buffers).
+  /// Android USB only — returns true if a live connection existed. No-op on other platforms.
+  Future<bool> resetPrinter(Printer printer) async {
+    if (printer.connectionType == ConnectionType.USB && !Platform.isWindows) {
+      return FlutterThermalPrinterPlatform.instance.resetPrinter(printer);
+    }
+    return true;
   }
 
   /// Get Printers from BT and USB

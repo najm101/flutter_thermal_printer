@@ -23,7 +23,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -43,6 +42,9 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     private static final String ACTION_USB_DETACHED = "android.hardware.usb.action.USB_DEVICE_DETACHED";
     private static final String TAG = "FPP";
 
+    // ESC @ — resets printer state (clears formatting, partial command buffers)
+    private static final byte[] ESC_AT = {0x1B, 0x40};
+
     // Device attach/detach event sink
     private EventChannel.EventSink events;
 
@@ -57,10 +59,7 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     // Polling scheduler — submits work to usbExecutor, never touches USB directly
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, ScheduledFuture<?>> pollTasks = new HashMap<>();
-    // Stores a comma-joined string of the 8 meaningful boolean fields per device key.
-    // String equality is unambiguous — avoids HashMap/autoboxing edge cases in comparisons.
     private final Map<String, String> lastSignatureMap = new HashMap<>();
-    // Stores the last full status map so getPrinterStatus() can return it in ASB mode.
     private final Map<String, Map<String, Object>> lastFullStatusMap = new HashMap<>();
     private EventChannel.EventSink statusEventSink;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -69,14 +68,14 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     private volatile boolean asbActive = false;
     private volatile boolean streamActive = false;
     private Thread asbThread;
-    // Incremented each time startStatusStream is called — old threads compare their
-    // captured generation and exit when it no longer matches, even if blocked in bulkTransfer
     private final AtomicInteger streamGeneration = new AtomicInteger(0);
-    private static final byte[] GS_A_ENABLE  = {0x1D, 0x61, 0x0F}; // enable all ASB notifications
-    private static final byte[] GS_A_DISABLE = {0x1D, 0x61, 0x00}; // disable ASB
+    private static final byte[] GS_A_ENABLE  = {0x1D, 0x61, 0x0F};
+    private static final byte[] GS_A_DISABLE = {0x1D, 0x61, 0x00};
 
     private BroadcastReceiver usbStateChangeReceiver;
     private static PendingIntent mPermissionIntent;
+
+    // Last printer the app asked to connect to — used by self-heal to auto-reopen
     private String connectionVendorId;
     private String connectionProductId;
     private Integer requestingPermission = 0;
@@ -95,35 +94,64 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             @SuppressLint("LongLogTag")
             @Override
             public void onReceive(Context context, Intent intent) {
-                if (Objects.equals(intent.getAction(), ACTION_USB_ATTACHED)) {
+                String action = intent.getAction();
+
+                if (Objects.equals(action, ACTION_USB_ATTACHED)) {
                     UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                     Log.d(TAG, "ACTION_USB_ATTACHED");
+
+                    // Self-heal: if the attached device is the one the app wants,
+                    // reopen the connection automatically (or request permission once).
+                    if (device != null && matchesIntendedDevice(device)) {
+                        UsbManager m = (UsbManager) context.getSystemService(USB_SERVICE);
+                        if (m.hasPermission(device)) {
+                            Log.d(TAG, "Self-heal: reopening connection for " + deviceKey(device));
+                            boolean opened = openAndStoreConnection(device, m);
+                            if (opened) {
+                                sendResetPrinter(deviceKey(device));
+                            }
+                        } else {
+                            Log.d(TAG, "Self-heal: requesting permission for " + deviceKey(device));
+                            PendingIntent pi = PendingIntent.getBroadcast(
+                                context, 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
+                            m.requestPermission(device, pi);
+                        }
+                    }
                     sendDevice(device);
-                } else if (Objects.equals(intent.getAction(), ACTION_USB_DETACHED)) {
+
+                } else if (Objects.equals(action, ACTION_USB_DETACHED)) {
                     UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                     Log.d(TAG, "ACTION_USB_DETACHED");
                     if (device != null) {
-                        String key = deviceKey(String.valueOf(device.getVendorId()), String.valueOf(device.getProductId()));
+                        String key = deviceKey(device);
                         stopPoll(key);
                         stopAsbThread();
                         asbActive = false;
                         closeConnection(key);
+                        // Reset permission retry counter so the next attach can request again
+                        requestingPermission = 0;
                     }
                     sendDevice(device);
-                }
-                Log.d(TAG, "ACTION_USB_PERMISSION " + (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)));
-                if (Objects.equals(intent.getAction(), ACTION_USB_PERMISSION)) {
+
+                } else if (Objects.equals(action, ACTION_USB_PERMISSION)) {
+                    Log.d(TAG, "ACTION_USB_PERMISSION granted=" + intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false));
                     synchronized (this) {
                         UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                         boolean permissionGranted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
-                        if (permissionGranted) {
+                        if (permissionGranted && device != null) {
                             Log.d(TAG, "Permission granted for device " + device);
                             UsbManager m = (UsbManager) context.getSystemService(USB_SERVICE);
-                            openAndStoreConnection(device, m);
+                            boolean opened = openAndStoreConnection(device, m);
+                            if (opened) {
+                                // Send ESC @ to clear any partial command left from the interrupted session
+                                sendResetPrinter(deviceKey(device));
+                            }
                             sendDevice(device);
                         } else {
-                            Log.d(TAG, "Permission denied for device " + device);
-                            connect(connectionVendorId, connectionProductId);
+                            Log.d(TAG, "Permission denied for device");
+                            if (connectionVendorId != null && connectionProductId != null) {
+                                connect(connectionVendorId, connectionProductId);
+                            }
                         }
                     }
                 }
@@ -211,13 +239,10 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     }
 
     private void startAsbLoop(String key, UsbDeviceConnection connection, UsbEndpoint epIn) {
-        // Capture generation at launch — if startStatusStream is called again this
-        // value will no longer match and the thread exits on its next timeout cycle
         final int myGeneration = streamGeneration.get();
         asbThread = new Thread(() -> {
             byte[] buf = new byte[4];
             while (streamActive && asbActive && streamGeneration.get() == myGeneration) {
-                // 2-second timeout so the loop wakes up and checks the generation
                 int read = connection.bulkTransfer(epIn, buf, 4, 2000);
                 if (read == 4 && streamGeneration.get() == myGeneration) {
                     Map<String, Object> status = parseAsbResponse(buf);
@@ -256,7 +281,6 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     }
 
     private void stopAsbThread() {
-        // Do NOT touch streamActive here — callers control that flag
         Thread t = asbThread;
         asbThread = null;
         if (t != null) {
@@ -293,7 +317,7 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         UsbDevice device = findDevice(m, vendorId, productId);
 
         if (device == null) {
-            Log.d(TAG, "Device not found.");
+            Log.d(TAG, "connect: device not found " + vendorId + "_" + productId);
             return;
         }
 
@@ -314,6 +338,12 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         stopAsbThread();
         asbActive = false;
         closeConnection(key);
+
+        // Clear intent so self-heal doesn't auto-reconnect after an explicit disconnect
+        if (vendorId.equals(connectionVendorId) && productId.equals(connectionProductId)) {
+            connectionVendorId = null;
+            connectionProductId = null;
+        }
 
         UsbManager m = (UsbManager) context.getSystemService(USB_SERVICE);
         UsbDevice device = findDevice(m, vendorId, productId);
@@ -336,14 +366,23 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         return m.hasPermission(device);
     }
 
-    public void printText(String vendorId, String productId, List<Integer> bytes) {
+    /**
+     * Attempts to print bytes to the device.
+     * Runs a pre-flight printer status check (cover, paper, online) and the USB
+     * write as a single atomic task on usbExecutor — no other USB I/O can interleave.
+     * Returns a result map with keys:
+     *   success (boolean), bytesWritten (int), errorCode (String), message (String)
+     */
+    public Map<String, Object> printText(String vendorId, String productId, List<Integer> bytes) {
         String key = deviceKey(vendorId, productId);
-        UsbDeviceConnection connection = connections.get(key);
-        UsbEndpoint endpointOut = endpointsOut.get(key);
 
-        if (connection == null || endpointOut == null) {
-            Log.d(TAG, "printText: no active connection for " + key);
-            return;
+        // Lazy self-heal: if there's no live connection, try to reopen before failing
+        if (!connections.containsKey(key)) {
+            Log.d(TAG, "printText: no connection for " + key + ", attempting reopen");
+            boolean reopened = attemptReopen(vendorId, productId);
+            if (!reopened) {
+                return errorResult("notConnected", "No active connection and reopen failed for " + key);
+            }
         }
 
         byte[] data = new byte[bytes.size()];
@@ -351,20 +390,74 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             data[i] = bytes.get(i).byteValue();
         }
 
-        CountDownLatch latch = new CountDownLatch(1);
-        usbExecutor.submit(() -> {
-            connection.bulkTransfer(endpointOut, data, data.length, 5000);
-            latch.countDown();
+        // Run pre-flight status check + write as one atomic task on usbExecutor.
+        // Timeout: up to 8s for status reads (4 x 2000ms DLE EOT) + 5s for write = 15s.
+        Future<Map<String, Object>> future = usbExecutor.submit(() -> {
+            UsbDeviceConnection connection = connections.get(key);
+            UsbEndpoint epOut = endpointsOut.get(key);
+            UsbEndpoint epIn  = endpointsIn.get(key);
+
+            if (connection == null || epOut == null) {
+                return errorResult("notConnected", "Endpoints missing after reopen for " + key);
+            }
+
+            // Pre-flight: read live status when IN endpoint is available and not in
+            // ASB mode (ASB thread owns the IN endpoint; use cached status instead).
+            if (epIn != null) {
+                Map<String, Object> status = asbActive
+                    ? lastFullStatusMap.getOrDefault(key, defaultStatus())
+                    : readStatusInternal(vendorId, productId);
+
+                boolean online    = Boolean.TRUE.equals(status.get("isOnline"));
+                boolean hasPaper  = Boolean.TRUE.equals(status.get("hasPaper"));
+                boolean coverOpen = Boolean.TRUE.equals(status.get("isCoverOpen"));
+
+                if (!online) {
+                    return errorResult("printerOffline", "Printer is offline or not responding");
+                }
+                if (coverOpen) {
+                    return errorResult("coverOpen", "Printer cover is open");
+                }
+                if (!hasPaper) {
+                    return errorResult("noPaper", "Printer is out of paper");
+                }
+            }
+
+            // Send bytes
+            int written = connection.bulkTransfer(epOut, data, data.length, 5000);
+            if (written < 0) {
+                // Stale connection — drop it so the next print triggers a fresh reopen
+                closeConnection(key);
+                return errorResult("writeFailed", "bulkTransfer returned " + written + " for " + key);
+            }
+            if (written < data.length) {
+                return errorResult("writeIncomplete",
+                    "Only " + written + "/" + data.length + " bytes written for " + key);
+            }
+            return successResult(written);
         });
+
         try {
-            latch.await(6, TimeUnit.SECONDS);
+            return future.get(15, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            return errorResult("writeTimeout", "Print operation timed out after 15s for " + key);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            return errorResult("writeTimeout", "Interrupted while waiting for USB write");
+        } catch (Exception e) {
+            return errorResult("unknown", e.getMessage() != null ? e.getMessage() : e.toString());
         }
     }
 
+    /** Sends ESC @ to reset printer formatting state. Returns true if a connection existed. */
+    public boolean resetPrinter(String vendorId, String productId) {
+        String key = deviceKey(vendorId, productId);
+        if (!connections.containsKey(key)) return false;
+        sendResetPrinter(key);
+        return true;
+    }
+
     public Map<String, Object> getPrinterStatus(String vendorId, String productId) {
-        // In ASB mode the IN endpoint is owned by the ASB thread — return cached status
         if (asbActive) {
             Map<String, Object> cached = lastFullStatusMap.get(deviceKey(vendorId, productId));
             return cached != null ? cached : defaultStatus();
@@ -383,7 +476,54 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     // Private helpers
     // -------------------------------------------------------------------------
 
-    // Must only be called from within usbExecutor to avoid concurrent USB access
+    /**
+     * Tries to reopen the connection for the given device.
+     * - If the device is found and permission is already granted: opens and returns true.
+     * - If permission is missing: fires a single requestPermission() and returns false
+     *   (the print that triggered this will fail, but the permission callback will
+     *   reopen the connection so the next print can succeed).
+     * - If the device isn't found at all: returns false.
+     */
+    private boolean attemptReopen(String vendorId, String productId) {
+        UsbManager m = (UsbManager) context.getSystemService(USB_SERVICE);
+        UsbDevice device = findDevice(m, vendorId, productId);
+        if (device == null) {
+            Log.d(TAG, "attemptReopen: device " + vendorId + "_" + productId + " not found");
+            return false;
+        }
+        if (m.hasPermission(device)) {
+            Log.d(TAG, "attemptReopen: permission already granted, reopening");
+            boolean opened = openAndStoreConnection(device, m);
+            if (opened) {
+                sendResetPrinter(deviceKey(device));
+            }
+            return opened;
+        }
+        // Request permission once; this print will fail but the callback will reopen
+        Log.d(TAG, "attemptReopen: requesting permission for " + vendorId + "_" + productId);
+        PendingIntent pi = PendingIntent.getBroadcast(
+            context, 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE);
+        m.requestPermission(device, pi);
+        return false;
+    }
+
+    /** Submits ESC @ to the usbExecutor — must not be called from within usbExecutor itself. */
+    private void sendResetPrinter(String key) {
+        UsbDeviceConnection connection = connections.get(key);
+        UsbEndpoint epOut = endpointsOut.get(key);
+        if (connection == null || epOut == null) return;
+        usbExecutor.submit(() ->
+            connection.bulkTransfer(epOut, ESC_AT, ESC_AT.length, 1000));
+        Log.d(TAG, "Sent ESC @ reset to " + key);
+    }
+
+    /** Returns true if the given device matches the last printer the app called connect() on. */
+    private boolean matchesIntendedDevice(UsbDevice device) {
+        return connectionVendorId != null && connectionProductId != null
+            && String.valueOf(device.getVendorId()).equals(connectionVendorId)
+            && String.valueOf(device.getProductId()).equals(connectionProductId);
+    }
+
     private Map<String, Object> readStatusInternal(String vendorId, String productId) {
         Map<String, Object> status = defaultStatus();
         String key = deviceKey(vendorId, productId);
@@ -451,9 +591,6 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         return status;
     }
 
-    // Produces a comma-joined string of the 8 meaningful boolean fields.
-    // Used for change-detection — rawBytes are excluded so printer heartbeats
-    // with fluctuating reserved bits don't cause false "change" events.
     private static String statusSignature(Map<String, Object> status) {
         return status.get("isOnline")             + "," +
                status.get("hasPaper")             + "," +
@@ -465,11 +602,9 @@ public class UsbPrinter implements EventChannel.StreamHandler {
                status.get("drawerKickOutPin");
     }
 
-    // Parses the 4-byte ASB packet the printer pushes autonomously.
-    // Byte layout mirrors DLE EOT 1/2/3/4 responses packed together.
     private Map<String, Object> parseAsbResponse(byte[] buf) {
         Map<String, Object> status = defaultStatus();
-        boolean isOnline = (buf[0] & 0x08) == 0;   // byte 0 bit 3
+        boolean isOnline = (buf[0] & 0x08) == 0;
         status.put("isOnline",             isOnline);
         status.put("isWaitingForRecovery", (buf[0] & 0x20) != 0);
         status.put("drawerKickOutPin",     (buf[0] & 0x04) != 0);
@@ -490,7 +625,7 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     }
 
     private boolean openAndStoreConnection(UsbDevice device, UsbManager m) {
-        String key = deviceKey(String.valueOf(device.getVendorId()), String.valueOf(device.getProductId()));
+        String key = deviceKey(device);
         closeConnection(key);
 
         UsbDeviceConnection connection = m.openDevice(device);
@@ -513,7 +648,7 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         connections.put(key, connection);
         if (epOut != null) endpointsOut.put(key, epOut);
         if (epIn != null) endpointsIn.put(key, epIn);
-        Log.d(TAG, "Opened persistent connection for " + key + " (IN=" + (epIn != null) + " OUT=" + (epOut != null) + ")");
+        Log.d(TAG, "Opened connection for " + key + " (IN=" + (epIn != null) + " OUT=" + (epOut != null) + ")");
         return true;
     }
 
@@ -539,7 +674,9 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             Log.d(TAG, "sendDevice: device or events is null");
             return;
         }
-        boolean connected = isConnected(String.valueOf(device.getVendorId()), String.valueOf(device.getProductId()));
+        boolean connected = isConnected(
+            String.valueOf(device.getVendorId()),
+            String.valueOf(device.getProductId()));
         HashMap<String, Object> deviceData = new HashMap<>();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             deviceData.put("name", device.getProductName());
@@ -562,8 +699,31 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         return null;
     }
 
+    private static String deviceKey(UsbDevice device) {
+        return device.getVendorId() + "_" + device.getProductId();
+    }
+
     private static String deviceKey(String vendorId, String productId) {
         return vendorId + "_" + productId;
+    }
+
+    private static Map<String, Object> successResult(int bytesWritten) {
+        Map<String, Object> r = new HashMap<>();
+        r.put("success", true);
+        r.put("bytesWritten", bytesWritten);
+        r.put("errorCode", "");
+        r.put("message", "");
+        return r;
+    }
+
+    private static Map<String, Object> errorResult(String code, String message) {
+        Map<String, Object> r = new HashMap<>();
+        r.put("success", false);
+        r.put("bytesWritten", 0);
+        r.put("errorCode", code);
+        r.put("message", message);
+        Log.d(TAG, "Print error [" + code + "]: " + message);
+        return r;
     }
 
     private static Map<String, Object> defaultStatus() {

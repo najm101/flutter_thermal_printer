@@ -10,12 +10,14 @@ import 'package:screenshot/screenshot.dart';
 import 'flutter_thermal_printer_platform_interface.dart';
 import 'printer_manager.dart';
 import 'utils/ble_config.dart';
+import 'utils/print_result.dart';
 import 'utils/printer.dart';
 import 'utils/printer_status.dart';
 
 export 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
 export 'package:flutter_thermal_printer/network/network_printer.dart';
 export 'package:flutter_thermal_printer/utils/ble_config.dart';
+export 'package:flutter_thermal_printer/utils/print_result.dart';
 export 'package:flutter_thermal_printer/utils/printer_status.dart';
 export 'package:universal_ble/universal_ble.dart';
 
@@ -87,29 +89,30 @@ class FlutterThermalPrinter {
     await PrinterManager.instance.disconnect(device);
   }
 
-  /// Print raw data to printer
+  /// Print raw data to printer.
   ///
-  /// [device] The printer device to print to.
-  /// [bytes] The raw bytes to print.
-  /// [longData] Whether the data is long and should be split into chunks.
-  /// [chunkSize] The size of each chunk if [longData] is true.
-  Future<void> printData(
+  /// Returns a [PrintResult] indicating success or the specific failure reason.
+  /// On Android USB the result reflects the actual USB write outcome.
+  Future<PrintResult> printData(
     Printer device,
     List<int> bytes, {
     bool longData = false,
     int? chunkSize,
-  }) async =>
+  }) =>
       PrinterManager.instance.printData(
         device,
         bytes,
-
-        ///
-        /// [refreshDuration] The duration between each scan refresh.
-        /// [connectionTypes] List of connection types to scan for (BLE, USB).
-        /// [androidUsesFineLocation] Whether to use fine location on Android for BLE scanning.
         longData: longData,
         chunkSize: chunkSize,
       );
+
+  /// Send ESC @ (0x1B 0x40) to reset the printer's formatting state.
+  ///
+  /// Useful after a reconnect to clear any partial ESC/POS command sequences
+  /// left in the printer's buffer from an interrupted session.
+  /// Android USB only — returns true if a live connection existed.
+  Future<bool> resetPrinter(Printer device) =>
+      PrinterManager.instance.resetPrinter(device);
 
   /// Get available printers
   Future<void> getPrinters({

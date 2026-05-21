@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -20,11 +21,11 @@ class MockFlutterThermalPrinterPlatform
   Future<bool> connect(Printer device) async => true;
 
   @override
-  Future<void> printText(
-    Printer device,
-    Uint8List data, {
-    String? path,
-  }) async {}
+  Future<PrintResult> printText(Printer device, Uint8List data, {String? path}) async =>
+      PrintResult.ok(data.length);
+
+  @override
+  Future<bool> resetPrinter(Printer device) async => true;
 
   @override
   Future<bool> isConnected(Printer device) async => false;
@@ -40,6 +41,22 @@ class MockFlutterThermalPrinterPlatform
 
   @override
   Future<void> getPrinters() async {}
+
+  @override
+  Future<PrinterStatus> getPrinterStatus(Printer device) async => const PrinterStatus(
+        isOnline: false,
+        hasPaper: false,
+        isPaperNearEnd: false,
+        isCoverOpen: false,
+        hasCutterError: false,
+        hasUnrecoverableError: false,
+        isWaitingForRecovery: false,
+        drawerKickOutPin: false,
+      );
+
+  @override
+  Stream<PrinterStatus> printerStatusStream(Printer device, {bool useAsb = false}) =>
+      const Stream.empty();
 }
 
 void main() {
