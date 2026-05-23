@@ -36,21 +36,28 @@ public class FlutterThermalPrinterPlugin implements FlutterPlugin, MethodCallHan
     statusEventChannel.setStreamHandler(new EventChannel.StreamHandler() {
       @Override
       public void onListen(Object arguments, EventChannel.EventSink events) {
-        if (arguments instanceof Map) {
-          Map<?, ?> args = (Map<?, ?>) arguments;
-          String vendorId = (String) args.get("vendorId");
-          String productId = (String) args.get("productId");
-          Boolean useAsb = (Boolean) args.get("useAsb");
-          usbPrinter.startStatusStream(vendorId, productId, Boolean.TRUE.equals(useAsb), events);
+        if (!(arguments instanceof Map)) {
+          events.error("badArguments", "Expected map with vendorId, productId, useAsb", null);
+          return;
         }
+        Map<?, ?> args = (Map<?, ?>) arguments;
+        String vendorId = (String) args.get("vendorId");
+        String productId = (String) args.get("productId");
+        if (vendorId == null || productId == null) {
+          events.error("badArguments", "vendorId and productId are required", null);
+          return;
+        }
+        Boolean useAsb = (Boolean) args.get("useAsb");
+        usbPrinter.startStatusStream(vendorId, productId, Boolean.TRUE.equals(useAsb), events);
       }
 
       @Override
       public void onCancel(Object arguments) {
-        if (arguments instanceof Map) {
-          Map<?, ?> args = (Map<?, ?>) arguments;
-          String vendorId = (String) args.get("vendorId");
-          String productId = (String) args.get("productId");
+        if (!(arguments instanceof Map)) return;
+        Map<?, ?> args = (Map<?, ?>) arguments;
+        String vendorId = (String) args.get("vendorId");
+        String productId = (String) args.get("productId");
+        if (vendorId != null && productId != null) {
           usbPrinter.stopStatusStream(vendorId, productId);
         }
       }
