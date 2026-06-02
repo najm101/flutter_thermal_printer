@@ -517,6 +517,69 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         }
     }
 
+    /**
+     * Compat print path for devices that don't support DLE EOT status queries
+     * (e.g. Telpo K8 built-in printer). Differences from printText:
+     *   1. No pre-flight status check — writes unconditionally.
+     *   2. Writes in 16 KB chunks, matching the ICOD SDK behaviour, so large
+     *      raster payloads are not truncated by Android's bulkTransfer limit.
+     */
+    public Map<String, Object> printTextCompat(String vendorId, String productId, List<Integer> bytes) {
+        String key = deviceKey(vendorId, productId);
+
+        if (!connections.containsKey(key)) {
+            Log.d(TAG, "printTextCompat: no connection for " + key + ", attempting reopen");
+            boolean reopened = attemptReopen(vendorId, productId);
+            if (!reopened) {
+                return errorResult("notConnected", "No active connection and reopen failed for " + key);
+            }
+        }
+
+        byte[] data = new byte[bytes.size()];
+        for (int i = 0; i < bytes.size(); i++) {
+            data[i] = bytes.get(i).byteValue();
+        }
+
+        Future<Map<String, Object>> future = usbExecutor.submit(() -> {
+            UsbDeviceConnection connection = connections.get(key);
+            UsbEndpoint epOut = endpointsOut.get(key);
+
+            if (connection == null || epOut == null) {
+                return errorResult("notConnected", "Endpoints missing after reopen for " + key);
+            }
+
+            // Chunk the payload into 16 KB blocks — matches ICOD SDK MAXSZIE.
+            // Android's bulkTransfer silently truncates or returns -1 for larger
+            // single transfers on some devices (K8 printer is one such device).
+            final int CHUNK = 16384;
+            int sent = 0;
+            while (sent < data.length) {
+                int len = Math.min(data.length - sent, CHUNK);
+                byte[] chunk = new byte[len];
+                System.arraycopy(data, sent, chunk, 0, len);
+                int w = connection.bulkTransfer(epOut, chunk, len, 5000);
+                if (w < 0) {
+                    closeConnection(key);
+                    return errorResult("writeFailed",
+                        "bulkTransfer returned " + w + " at offset " + sent + " for " + key);
+                }
+                sent += w;
+            }
+            return successResult(sent);
+        });
+
+        try {
+            return future.get(30, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            return errorResult("writeTimeout", "Compat print timed out after 30s for " + key);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResult("writeTimeout", "Interrupted while waiting for compat USB write");
+        } catch (Exception e) {
+            return errorResult("unknown", e.getMessage() != null ? e.getMessage() : e.toString());
+        }
+    }
+
     /** Sends ESC @ to reset printer formatting state. Returns true if a connection existed. */
     public boolean resetPrinter(String vendorId, String productId) {
         String key = deviceKey(vendorId, productId);

@@ -90,7 +90,10 @@ public class FlutterThermalPrinterPlugin implements FlutterPlugin, MethodCallHan
               String vendorId = call.argument("vendorId");
               String productId = call.argument("productId");
               List<Integer> data = call.argument("data");
-              Map<String, Object> printResult = usbPrinter.printText(vendorId, productId, data);
+              Boolean useCompatMode = call.argument("useCompatMode");
+              Map<String, Object> printResult = Boolean.TRUE.equals(useCompatMode)
+                  ? usbPrinter.printTextCompat(vendorId, productId, data)
+                  : usbPrinter.printText(vendorId, productId, data);
               result.success(printResult);
               break;
           }

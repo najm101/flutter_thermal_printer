@@ -221,12 +221,17 @@ class PrinterManager {
     // USB devices don't need explicit disconnection
   }
 
-  /// Print data to printer device
+  /// Print data to printer device.
+  ///
+  /// Set [useCompatMode] to `true` for devices that don't respond to DLE EOT
+  /// status queries and require chunked USB writes (e.g. Telpo K8 built-in
+  /// printer). Has no effect on non-Android-USB connection types.
   Future<PrintResult> printData(
     Printer printer,
     List<int> bytes, {
     bool longData = false,
     int? chunkSize,
+    bool useCompatMode = false,
   }) async {
     if (printer.connectionType == ConnectionType.USB) {
       if (Platform.isWindows) {
@@ -243,6 +248,7 @@ class PrinterManager {
           printer,
           Uint8List.fromList(bytes),
           path: printer.address,
+          useCompatMode: useCompatMode,
         );
       }
     } else if (printer.connectionType == ConnectionType.BLE) {

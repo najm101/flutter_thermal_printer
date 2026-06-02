@@ -31,7 +31,7 @@ abstract class FlutterThermalPrinterPlatform extends PlatformInterface {
     throw UnimplementedError('connect() has not been implemented.');
   }
 
-  Future<PrintResult> printText(Printer device, Uint8List data, {String? path}) {
+  Future<PrintResult> printText(Printer device, Uint8List data, {String? path, bool useCompatMode = false}) {
     throw UnimplementedError('printText() has not been implemented.');
   }
 

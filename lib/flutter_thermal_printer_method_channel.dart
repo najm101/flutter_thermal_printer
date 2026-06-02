@@ -42,6 +42,7 @@ class MethodChannelFlutterThermalPrinter extends FlutterThermalPrinterPlatform {
     Printer device,
     Uint8List data, {
     String? path,
+    bool useCompatMode = false,
   }) async {
     try {
       final result = await methodChannel.invokeMapMethod<dynamic, dynamic>(
@@ -52,6 +53,7 @@ class MethodChannelFlutterThermalPrinter extends FlutterThermalPrinterPlatform {
           'name': device.name,
           'data': List<int>.from(data),
           'path': path ?? '',
+          'useCompatMode': useCompatMode,
         },
       );
       return PrintResult.fromMap(result ?? {'success': false, 'errorCode': 'unknown', 'message': 'null result'});

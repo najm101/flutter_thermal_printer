@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(javap -p -c com/szsicod/print/io/USBAPI.class)",
+      "Bash(which cfr *)",
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//usr/local/bin/**)",
+      "Bash(awk '/public int connect\\\\\\(\\\\\\)|public boolean open|getUsbEndpoint|public.*connect|private.*open/{p=1} p')",
+      "Bash(awk '/private java.lang.Boolean InitIOConfig\\\\\\(\\\\\\);/{p=1} p{print} /public int closeDevice\\\\\\(\\\\\\);/{if\\(p\\)exit}')",
+      "Bash(awk '/public int openDevice\\\\\\(\\\\\\);/{p=1} p{print} /private java.lang.Boolean InitIOConfig\\\\\\(\\\\\\);/{if\\(p\\)exit}')",
+      "Bash(awk '/public int writeBuffer/{p=1} p{print} /public void clear\\\\\\(\\\\\\);/{if\\(p\\)exit}')",
+      "Bash(javap -p -c -constants com/szsicod/print/io/USBAPI.class)"
+    ]
+  }
+}
