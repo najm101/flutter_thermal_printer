@@ -21,7 +21,7 @@ class MockFlutterThermalPrinterPlatform
   Future<bool> connect(Printer device) async => true;
 
   @override
-  Future<PrintResult> printText(Printer device, Uint8List data, {String? path}) async =>
+  Future<PrintResult> printText(Printer device, Uint8List data, {String? path, bool useCompatMode = false}) async =>
       PrintResult.ok(data.length);
 
   @override

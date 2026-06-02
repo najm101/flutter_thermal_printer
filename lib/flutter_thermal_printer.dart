@@ -98,12 +98,14 @@ class FlutterThermalPrinter {
     List<int> bytes, {
     bool longData = false,
     int? chunkSize,
+    bool useCompatMode = false, // Deprecated/unused parameter for compatibility mode
   }) =>
       PrinterManager.instance.printData(
         device,
         bytes,
         longData: longData,
         chunkSize: chunkSize,
+        useCompatMode: useCompatMode,
       );
 
   /// Send ESC @ (0x1B 0x40) to reset the printer's formatting state.
