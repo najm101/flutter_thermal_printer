@@ -98,7 +98,7 @@ class FlutterThermalPrinter {
     List<int> bytes, {
     bool longData = false,
     int? chunkSize,
-    bool useCompatMode = false, // Deprecated/unused parameter for compatibility mode
+    bool useCompatMode = false,
   }) =>
       PrinterManager.instance.printData(
         device,
@@ -231,6 +231,7 @@ class FlutterThermalPrinter {
     bool printOnBle = false,
     bool cutAfterPrinted = true,
     int? chunkSize,
+    bool useCompatMode = false,
   }) async {
     final controller = ScreenshotController();
 
@@ -249,6 +250,7 @@ class FlutterThermalPrinter {
         profile,
         cutAfterPrinted,
         chunkSize: chunkSize,
+        useCompatMode: useCompatMode,
       );
     } catch (e) {
       throw Exception('Failed to print widget: $e');
@@ -320,6 +322,7 @@ class FlutterThermalPrinter {
     CapabilityProfile? profile,
     bool cutAfterPrinted, {
     int? chunkSize,
+    bool useCompatMode = false,
   }) async {
     final profile0 = profile ?? await CapabilityProfile.load();
     final ticket = Generator(paperSize, profile0);
@@ -343,6 +346,7 @@ class FlutterThermalPrinter {
         raster,
         longData: true,
         chunkSize: chunkSize,
+        useCompatMode: useCompatMode,
       );
     } else {
       // For other platforms, use chunked approach
@@ -371,7 +375,7 @@ class FlutterThermalPrinter {
           croppedImage,
         );
       }
-      await printData(printer, raster, longData: true, chunkSize: chunkSize);
+      await printData(printer, raster, longData: true, chunkSize: chunkSize, useCompatMode: useCompatMode);
 
       if (cutAfterPrinted) {
         await printData(
@@ -379,6 +383,7 @@ class FlutterThermalPrinter {
           ticket.cut(),
           longData: true,
           chunkSize: chunkSize,
+          useCompatMode: useCompatMode,
         );
       }
     }
