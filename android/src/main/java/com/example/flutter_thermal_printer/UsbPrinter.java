@@ -595,6 +595,16 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             Map<String, Object> cached = lastFullStatusMap.get(key);
             return cached != null ? cached : defaultStatus();
         }
+        // Self-heal the connection before reading, mirroring printText(): a
+        // discovered-but-unopened device (e.g. plugged in after launch, or never
+        // printed to) has no cached UsbDeviceConnection, so readStatusInternal
+        // would otherwise return defaultStatus() (offline) until the first print.
+        // attemptReopen() opens the endpoint when USB permission is held, or
+        // requests it once so the next read succeeds.
+        if (!connections.containsKey(key)) {
+            Log.d(TAG, "getPrinterStatus: no connection for " + key + ", attempting reopen");
+            attemptReopen(vendorId, productId);
+        }
         Future<Map<String, Object>> future = usbExecutor.submit(() ->
             readStatusInternal(vendorId, productId));
         try {
