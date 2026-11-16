@@ -72,6 +72,11 @@ public class UsbPrinter implements EventChannel.StreamHandler {
 
     private BroadcastReceiver usbStateChangeReceiver;
 
+    // Devices whose permission prompt the user cancelled. Background paths
+    // (status reads, attach self-heal) won't prompt for them again until the
+    // device is re-attached or the app explicitly calls connect().
+    private final java.util.Set<String> permissionDeclined = ConcurrentHashMap.newKeySet();
+
     // Last printer the app asked to connect to — used by self-heal to auto-reopen
     private String connectionVendorId;
     private String connectionProductId;
@@ -130,7 +135,8 @@ public class UsbPrinter implements EventChannel.StreamHandler {
                     UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                     Log.d(TAG, "ACTION_USB_ATTACHED");
 
-                    if (device != null && matchesIntendedDevice(device)) {
+                    if (device != null) permissionDeclined.remove(deviceKey(device));
+                    if (device != null && matchesIntendedDevice(device) && isPrinterCandidate(device)) {
                         UsbManager m = (UsbManager) context.getSystemService(USB_SERVICE);
                         if (m.hasPermission(device)) {
                             Log.d(TAG, "Self-heal: reopening connection for " + deviceKey(device));
@@ -167,9 +173,15 @@ public class UsbPrinter implements EventChannel.StreamHandler {
                             if (opened) sendResetPrinter(deviceKey(device));
                             sendDevice(device);
                         } else {
-                            Log.d(TAG, "Permission denied for device");
-                            if (connectionVendorId != null && connectionProductId != null) {
-                                connect(connectionVendorId, connectionProductId);
+                            // Do NOT re-request here: re-prompting from the denial
+                            // callback is what made the system dialog impossible to
+                            // dismiss. Remember the denial; the app can ask again
+                            // through an explicit connect().
+                            Log.d(TAG, "Permission denied for device " + device);
+                            requestingPermission = 0;
+                            if (device != null) {
+                                permissionDeclined.add(deviceKey(device));
+                                sendDevice(device);
                             }
                         }
                     }
@@ -372,6 +384,10 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         List<Map<String, Object>> data = new ArrayList<>();
         for (Map.Entry<String, UsbDevice> entry : usbDevices.entrySet()) {
             UsbDevice device = entry.getValue();
+            if (!isPrinterCandidate(device)) {
+                Log.d(TAG, "getUsbDevicesList: skipping non-printer " + describe(device));
+                continue;
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 HashMap<String, Object> deviceData = new HashMap<>();
                 deviceData.put("name", device.getProductName());
@@ -394,6 +410,14 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             Log.d(TAG, "connect: device not found " + vendorId + "_" + productId);
             return;
         }
+        if (!isPrinterCandidate(device)) {
+            Log.w(TAG, "connect: refusing non-printer " + describe(device));
+            connectionVendorId = null;
+            connectionProductId = null;
+            return;
+        }
+        // An explicit connect is a deliberate request, so it may prompt again.
+        permissionDeclined.remove(deviceKey(device));
 
         if (!m.hasPermission(device) && requestingPermission < 2) {
             requestingPermission++;
@@ -632,11 +656,19 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             Log.d(TAG, "attemptReopen: device " + vendorId + "_" + productId + " not found");
             return false;
         }
+        if (!isPrinterCandidate(device)) {
+            Log.d(TAG, "attemptReopen: not a printer " + describe(device));
+            return false;
+        }
         if (m.hasPermission(device)) {
             Log.d(TAG, "attemptReopen: permission already granted, reopening");
             boolean opened = openAndStoreConnection(device, m);
             if (opened) sendResetPrinter(deviceKey(device));
             return opened;
+        }
+        if (permissionDeclined.contains(deviceKey(device))) {
+            Log.d(TAG, "attemptReopen: permission previously declined for " + deviceKey(device));
+            return false;
         }
         Log.d(TAG, "attemptReopen: requesting permission for " + vendorId + "_" + productId);
         m.requestPermission(device, permissionPendingIntent());
@@ -826,6 +858,10 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             Log.d(TAG, "sendDevice: device or events is null");
             return;
         }
+        if (!isPrinterCandidate(device)) {
+            Log.d(TAG, "sendDevice: skipping non-printer " + describe(device));
+            return;
+        }
         boolean connected = isConnected(
             String.valueOf(device.getVendorId()),
             String.valueOf(device.getProductId()));
@@ -849,6 +885,63 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             }
         }
         return null;
+    }
+
+    /**
+     * Whether [device] can plausibly be a receipt printer. The plugin prints by
+     * writing to a bulk OUT endpoint on interface 0, so:
+     * - USB printer class (7) on the device or any interface always qualifies;
+     * - otherwise interface 0 must expose a bulk OUT endpoint and must not be a
+     *   known non-printer class (HID, storage, hub, audio, video, wireless).
+     * A device whose every interface is HID (keyboard-wedge barcode scanners,
+     * keyboards, mice) never qualifies. Enumerating those as printers made the
+     * host app prompt for USB access to them, and claiming interface 0 with
+     * force=true detached the kernel HID driver and broke the scanner.
+     */
+    static boolean isPrinterCandidate(UsbDevice device) {
+        if (device == null) return false;
+        if (device.getDeviceClass() == UsbConstants.USB_CLASS_PRINTER) return true;
+        int count = device.getInterfaceCount();
+        if (count == 0) return false;
+        boolean allHid = true;
+        for (int i = 0; i < count; i++) {
+            int cls = device.getInterface(i).getInterfaceClass();
+            if (cls == UsbConstants.USB_CLASS_PRINTER) return true;
+            if (cls != UsbConstants.USB_CLASS_HID) allHid = false;
+        }
+        if (allHid) return false;
+        android.hardware.usb.UsbInterface iface = device.getInterface(0);
+        switch (iface.getInterfaceClass()) {
+            case UsbConstants.USB_CLASS_AUDIO:
+            case UsbConstants.USB_CLASS_HID:
+            case UsbConstants.USB_CLASS_MASS_STORAGE:
+            case UsbConstants.USB_CLASS_HUB:
+            case UsbConstants.USB_CLASS_VIDEO:
+            case UsbConstants.USB_CLASS_WIRELESS_CONTROLLER:
+                return false;
+            default:
+                break;
+        }
+        for (int i = 0; i < iface.getEndpointCount(); i++) {
+            UsbEndpoint ep = iface.getEndpoint(i);
+            if (ep.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK
+                    && ep.getDirection() == UsbConstants.USB_DIR_OUT) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String describe(UsbDevice device) {
+        StringBuilder classes = new StringBuilder();
+        for (int i = 0; i < device.getInterfaceCount(); i++) {
+            if (i > 0) classes.append(',');
+            classes.append(device.getInterface(i).getInterfaceClass());
+        }
+        String name = Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+            ? device.getProductName() : null;
+        return deviceKey(device) + " (" + name + ", class=" + device.getDeviceClass()
+            + ", interfaces=[" + classes + "])";
     }
 
     private static String deviceKey(UsbDevice device) {
