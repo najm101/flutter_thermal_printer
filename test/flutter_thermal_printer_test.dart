@@ -18,7 +18,7 @@ class MockFlutterThermalPrinterPlatform
   Future<dynamic> startUsbScan() async => [];
 
   @override
-  Future<bool> connect(Printer device) async => true;
+  Future<bool> connect(Printer device, {bool allowTakeover = true}) async => true;
 
   @override
   Future<PrintResult> printText(Printer device, Uint8List data, {String? path, bool useCompatMode = false}) async =>

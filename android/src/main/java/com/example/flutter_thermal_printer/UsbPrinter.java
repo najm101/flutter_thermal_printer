@@ -57,10 +57,18 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     private final Map<String, UsbEndpoint> endpointsOut = new ConcurrentHashMap<>();
     private final Map<String, UsbEndpoint> endpointsIn = new ConcurrentHashMap<>();
 
-    // All USB bulk transfers are serialized through this single-thread executor
-    private final ExecutorService usbExecutor = Executors.newSingleThreadExecutor();
+    // USB bulk transfers are serialized per device: each device key gets its own
+    // single-thread executor. A single device's print, status read and stream
+    // work still run strictly one after another (same as before), but a device
+    // that never answers (e.g. a USB Ethernet adapter mistaken for a printer)
+    // can no longer queue in front of the real printer.
+    private final Map<String, ExecutorService> deviceExecutors = new ConcurrentHashMap<>();
 
-    // Polling scheduler — submits work to usbExecutor, never touches USB directly
+    // Guards opening/closing connections. Print and status calls now run off the
+    // main thread, so two callers may try to (re)open the same device at once.
+    private final Object connectionLock = new Object();
+
+    // Polling scheduler — submits work to the device executor, never touches USB directly
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -76,6 +84,19 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     // (status reads, attach self-heal) won't prompt for them again until the
     // device is re-attached or the app explicitly calls connect().
     private final java.util.Set<String> permissionDeclined = ConcurrentHashMap.newKeySet();
+
+    // Whether the app allows taking a device over from an Android kernel driver
+    // (claimInterface force=true), keyed by device. Set by connect(). Devices
+    // that declare the USB printer class are always allowed; for anything else
+    // the default is NO, so a device Android is actively using (e.g. a USB
+    // Ethernet adapter carrying the kiosk's network) is never ripped away from
+    // it just because it looks like a printer.
+    private final Map<String, Boolean> takeoverAllowed = new ConcurrentHashMap<>();
+
+    // Devices whose interface 0 is held by an Android driver and that we were
+    // not allowed to take over. Never opened again until re-attached or until
+    // the app explicitly connects with takeover allowed.
+    private final java.util.Set<String> systemOwned = ConcurrentHashMap.newKeySet();
 
     // Last printer the app asked to connect to — used by self-heal to auto-reopen
     private String connectionVendorId;
@@ -96,6 +117,10 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         volatile boolean active = false;
         volatile Thread asbThread;
         volatile ScheduledFuture<?> pollTask;
+        // The poll currently queued/running on the device executor. A new poll is
+        // skipped while this one is unfinished, so a device that never answers
+        // can't pile up an unbounded backlog of status reads.
+        volatile Future<?> inFlightPoll;
 
         StreamRequest(String key, String vendorId, String productId,
                       boolean useAsb, EventChannel.EventSink sink) {
@@ -135,7 +160,10 @@ public class UsbPrinter implements EventChannel.StreamHandler {
                     UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                     Log.d(TAG, "ACTION_USB_ATTACHED");
 
-                    if (device != null) permissionDeclined.remove(deviceKey(device));
+                    if (device != null) {
+                        permissionDeclined.remove(deviceKey(device));
+                        systemOwned.remove(deviceKey(device));
+                    }
                     if (device != null && matchesIntendedDevice(device) && isPrinterCandidate(device)) {
                         UsbManager m = (UsbManager) context.getSystemService(USB_SERVICE);
                         if (m.hasPermission(device)) {
@@ -153,6 +181,7 @@ public class UsbPrinter implements EventChannel.StreamHandler {
                     UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                     Log.d(TAG, "ACTION_USB_DETACHED");
                     if (device != null) {
+                        systemOwned.remove(deviceKey(device));
                         // closeConnection pauses the stream loop but keeps the StreamRequest
                         // so it auto-resumes when the device reattaches
                         closeConnection(deviceKey(device));
@@ -264,9 +293,9 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         req.generation.incrementAndGet();
 
         if (req.useAsb) {
-            // Send ASB-enable on usbExecutor; start the read thread only after it completes
+            // Send ASB-enable on the device executor; start the read thread only after it completes
             // so the printer is in ASB mode before we start reading.
-            usbExecutor.submit(() -> {
+            executorFor(req.key).submit(() -> {
                 conn.bulkTransfer(epOut, GS_A_ENABLE, GS_A_ENABLE.length, 2000);
                 startAsbLoop(req);
                 Log.d(TAG, "ASB mode started for " + req.key);
@@ -294,7 +323,7 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             UsbDeviceConnection conn = connections.get(req.key);
             UsbEndpoint epOut = endpointsOut.get(req.key);
             if (conn != null && epOut != null) {
-                usbExecutor.submit(() ->
+                executorFor(req.key).submit(() ->
                     conn.bulkTransfer(epOut, GS_A_DISABLE, GS_A_DISABLE.length, 1000));
             }
         }
@@ -305,7 +334,7 @@ public class UsbPrinter implements EventChannel.StreamHandler {
      * iteration so a fresh openAndStoreConnection() is picked up automatically without
      * restarting the thread.
      *
-     * Must be called from the usbExecutor thread (startAsbLoop submits via it) so that
+     * Must be called from the device executor thread (startAsbLoop submits via it) so that
      * the first read begins only after the ASB-enable transfer has completed.
      */
     private void startAsbLoop(StreamRequest req) {
@@ -345,7 +374,12 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     private void startPolling(StreamRequest req) {
         ScheduledFuture<?> task = scheduler.scheduleWithFixedDelay(() -> {
             if (!req.active) return;
-            usbExecutor.submit(() -> {
+            Future<?> previous = req.inFlightPoll;
+            if (previous != null && !previous.isDone()) {
+                Log.d(TAG, "Poll skipped for " + req.key + ": previous read still running");
+                return;
+            }
+            req.inFlightPoll = executorFor(req.key).submit(() -> {
                 Map<String, Object> status = readStatusInternal(req.vendorId, req.productId);
                 String sig = statusSignature(status);
                 if (!sig.equals(lastSignatureMap.get(req.key))) {
@@ -394,15 +428,20 @@ public class UsbPrinter implements EventChannel.StreamHandler {
                 deviceData.put("vendorId", String.valueOf(device.getVendorId()));
                 deviceData.put("productId", String.valueOf(device.getProductId()));
                 deviceData.put("connected", m.hasPermission(device));
+                deviceData.put("printerClass", isPrinterClassDevice(device));
+                deviceData.put("inUseBySystem", systemOwned.contains(deviceKey(device)));
                 data.add(deviceData);
             }
         }
         return data;
     }
 
-    public void connect(String vendorId, String productId) {
+    public void connect(String vendorId, String productId, boolean allowTakeover) {
         connectionVendorId = vendorId;
         connectionProductId = productId;
+        String connectKey = deviceKey(vendorId, productId);
+        takeoverAllowed.put(connectKey, allowTakeover);
+        if (allowTakeover) systemOwned.remove(connectKey);
         UsbManager m = (UsbManager) context.getSystemService(Context.USB_SERVICE);
         UsbDevice device = findDevice(m, vendorId, productId);
 
@@ -452,6 +491,8 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             deviceData.put("vendorId", vendorId);
             deviceData.put("productId", productId);
             deviceData.put("connected", false);
+            deviceData.put("printerClass", isPrinterClassDevice(device));
+            deviceData.put("inUseBySystem", systemOwned.contains(deviceKey(device)));
             events.success(deviceData);
         }
         return true;
@@ -467,7 +508,7 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     /**
      * Attempts to print bytes to the device.
      * Runs a pre-flight printer status check (cover, paper, online) and the USB
-     * write as a single atomic task on usbExecutor — no other USB I/O can interleave.
+     * write as a single atomic task on the device executor — no other USB I/O can interleave.
      * Returns a result map with keys:
      *   success (boolean), bytesWritten (int), errorCode (String), message (String)
      */
@@ -487,9 +528,9 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             data[i] = bytes.get(i).byteValue();
         }
 
-        // Run pre-flight status check + write as one atomic task on usbExecutor.
+        // Run pre-flight status check + write as one atomic task on the device executor.
         // Timeout: up to 8s for status reads (4 x 2000ms DLE EOT) + 5s for write = 15s.
-        Future<Map<String, Object>> future = usbExecutor.submit(() -> {
+        Future<Map<String, Object>> future = executorFor(key).submit(() -> {
             UsbDeviceConnection connection = connections.get(key);
             UsbEndpoint epOut = endpointsOut.get(key);
             UsbEndpoint epIn  = endpointsIn.get(key);
@@ -564,7 +605,7 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             data[i] = bytes.get(i).byteValue();
         }
 
-        Future<Map<String, Object>> future = usbExecutor.submit(() -> {
+        Future<Map<String, Object>> future = executorFor(key).submit(() -> {
             UsbDeviceConnection connection = connections.get(key);
             UsbEndpoint epOut = endpointsOut.get(key);
 
@@ -629,7 +670,7 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             Log.d(TAG, "getPrinterStatus: no connection for " + key + ", attempting reopen");
             attemptReopen(vendorId, productId);
         }
-        Future<Map<String, Object>> future = usbExecutor.submit(() ->
+        Future<Map<String, Object>> future = executorFor(key).submit(() ->
             readStatusInternal(vendorId, productId));
         try {
             return future.get(10, TimeUnit.SECONDS);
@@ -660,11 +701,19 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             Log.d(TAG, "attemptReopen: not a printer " + describe(device));
             return false;
         }
+        if (systemOwned.contains(deviceKey(device))) {
+            Log.d(TAG, "attemptReopen: in use by an Android driver, not taking over " + describe(device));
+            return false;
+        }
         if (m.hasPermission(device)) {
-            Log.d(TAG, "attemptReopen: permission already granted, reopening");
-            boolean opened = openAndStoreConnection(device, m);
-            if (opened) sendResetPrinter(deviceKey(device));
-            return opened;
+            synchronized (connectionLock) {
+                // Another caller may have reopened it while we waited for the lock.
+                if (connections.containsKey(deviceKey(device))) return true;
+                Log.d(TAG, "attemptReopen: permission already granted, reopening");
+                boolean opened = openAndStoreConnection(device, m);
+                if (opened) sendResetPrinter(deviceKey(device));
+                return opened;
+            }
         }
         if (permissionDeclined.contains(deviceKey(device))) {
             Log.d(TAG, "attemptReopen: permission previously declined for " + deviceKey(device));
@@ -675,12 +724,12 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         return false;
     }
 
-    /** Submits ESC @ to the usbExecutor — must not be called from within usbExecutor itself. */
+    /** Queues ESC @ on the device's executor (fire-and-forget, never waits). */
     private void sendResetPrinter(String key) {
         UsbDeviceConnection connection = connections.get(key);
         UsbEndpoint epOut = endpointsOut.get(key);
         if (connection == null || epOut == null) return;
-        usbExecutor.submit(() ->
+        executorFor(key).submit(() ->
             connection.bulkTransfer(epOut, ESC_AT, ESC_AT.length, 1000));
         Log.d(TAG, "Sent ESC @ reset to " + key);
     }
@@ -792,6 +841,12 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     }
 
     private boolean openAndStoreConnection(UsbDevice device, UsbManager m) {
+        synchronized (connectionLock) {
+            return openAndStoreConnectionLocked(device, m);
+        }
+    }
+
+    private boolean openAndStoreConnectionLocked(UsbDevice device, UsbManager m) {
         String key = deviceKey(device);
         closeConnection(key);
 
@@ -800,7 +855,19 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             Log.d(TAG, "openDevice failed for " + key);
             return false;
         }
-        connection.claimInterface(device.getInterface(0), true);
+        boolean mayTakeOver = isPrinterClassDevice(device)
+            || Boolean.TRUE.equals(takeoverAllowed.get(key));
+        boolean claimed = connection.claimInterface(device.getInterface(0), mayTakeOver);
+        if (!claimed && !mayTakeOver) {
+            // An Android driver owns this interface (network adapter, serial
+            // bridge, ...). Leave it alone instead of detaching that driver.
+            connection.close();
+            systemOwned.add(key);
+            Log.w(TAG, "Not taking over " + describe(device) + ": in use by an Android driver");
+            final UsbDevice owned = device;
+            mainHandler.post(() -> sendDevice(owned));
+            return false;
+        }
 
         UsbEndpoint epOut = null;
         UsbEndpoint epIn = null;
@@ -829,6 +896,12 @@ public class UsbPrinter implements EventChannel.StreamHandler {
     }
 
     private void closeConnection(String key) {
+        synchronized (connectionLock) {
+            closeConnectionLocked(key);
+        }
+    }
+
+    private void closeConnectionLocked(String key) {
         // Pause (but do not remove) the stream request so it auto-resumes on reconnect
         StreamRequest req = streamRequests.get(key);
         if (req != null && req.active) {
@@ -872,8 +945,19 @@ public class UsbPrinter implements EventChannel.StreamHandler {
         deviceData.put("vendorId", String.valueOf(device.getVendorId()));
         deviceData.put("productId", String.valueOf(device.getProductId()));
         deviceData.put("connected", connected);
+        deviceData.put("printerClass", isPrinterClassDevice(device));
+        deviceData.put("inUseBySystem", systemOwned.contains(deviceKey(device)));
         Log.d(TAG, "Sending device data: " + deviceData);
         events.success(deviceData);
+    }
+
+    /** The single-thread executor that serializes all USB I/O for [key]. */
+    private ExecutorService executorFor(String key) {
+        return deviceExecutors.computeIfAbsent(key, k -> Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "FTP-usb-" + k);
+            t.setDaemon(true);
+            return t;
+        }));
     }
 
     private UsbDevice findDevice(UsbManager m, String vendorId, String productId) {
@@ -926,6 +1010,23 @@ public class UsbPrinter implements EventChannel.StreamHandler {
             UsbEndpoint ep = iface.getEndpoint(i);
             if (ep.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK
                     && ep.getDirection() == UsbConstants.USB_DIR_OUT) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True when the device declares itself a USB printer (class 7) on the device
+     * or any interface. Informational only — vendor-class receipt printers that
+     * report a different class still print normally; the host app uses this to
+     * prefer genuine printers when auto-selecting a default.
+     */
+    static boolean isPrinterClassDevice(UsbDevice device) {
+        if (device == null) return false;
+        if (device.getDeviceClass() == UsbConstants.USB_CLASS_PRINTER) return true;
+        for (int i = 0; i < device.getInterfaceCount(); i++) {
+            if (device.getInterface(i).getInterfaceClass() == UsbConstants.USB_CLASS_PRINTER) {
                 return true;
             }
         }

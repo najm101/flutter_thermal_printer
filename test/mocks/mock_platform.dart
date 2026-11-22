@@ -44,7 +44,7 @@ class MockFlutterThermalPrinterPlatform extends FlutterThermalPrinterPlatform
   }
 
   @override
-  Future<bool> connect(Printer device) async {
+  Future<bool> connect(Printer device, {bool allowTakeover = true}) async {
     methodCalls.add('connect');
     methodArguments.add(device);
     return connectResult;

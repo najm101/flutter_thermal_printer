@@ -75,13 +75,18 @@ class FlutterThermalPrinter {
   /// [device] The printer device to connect to.
   /// [connectionStabilizationDelay] Optional delay to wait after connection is established
   /// before considering it stable. Defaults to [BleConfig.connectionStabilizationDelay].
+  ///
+  /// [allowTakeover] (USB/Android): whether a device an Android driver is
+  /// using may be taken over. See [FlutterThermalPrinterPlatform.connect].
   Future<bool> connect(
     Printer device, {
     Duration? connectionStabilizationDelay,
+    bool allowTakeover = true,
   }) async =>
       PrinterManager.instance.connect(
         device,
         connectionStabilizationDelay: connectionStabilizationDelay,
+        allowTakeover: allowTakeover,
       );
 
   /// Disconnect from a printer device

@@ -99,13 +99,15 @@ class PrinterManager {
   Future<bool> connect(
     Printer device, {
     Duration? connectionStabilizationDelay,
+    bool allowTakeover = true,
   }) async {
     if (device.connectionType == ConnectionType.USB) {
       if (Platform.isWindows) {
         // Windows USB connection - device is already available, no connection needed
         return true;
       } else {
-        return FlutterThermalPrinterPlatform.instance.connect(device);
+        return FlutterThermalPrinterPlatform.instance
+            .connect(device, allowTakeover: allowTakeover);
       }
     } else if (device.connectionType == ConnectionType.BLE) {
       try {
@@ -371,6 +373,8 @@ class PrinterManager {
             connectionType: ConnectionType.USB,
             address: map['vendorId'].toString(),
             isConnected: false,
+            isPrinterClass: map['printerClass'] as bool?,
+            isInUseBySystem: map['inUseBySystem'] as bool?,
           );
           final isConnected =
               await FlutterThermalPrinterPlatform.instance.isConnected(
@@ -395,6 +399,8 @@ class PrinterManager {
                 connectionType: ConnectionType.USB,
                 address: map['vendorId'].toString(),
                 isConnected: map['connected'] ?? false,
+                isPrinterClass: map['printerClass'] as bool?,
+                isInUseBySystem: map['inUseBySystem'] as bool?,
               ),
             );
           });
@@ -414,6 +420,8 @@ class PrinterManager {
                 connectionType: ConnectionType.USB,
                 address: map['vendorId'].toString(),
                 isConnected: false,
+                isPrinterClass: map['printerClass'] as bool?,
+                isInUseBySystem: map['inUseBySystem'] as bool?,
               );
               final isConnected =
                   await FlutterThermalPrinterPlatform.instance.isConnected(

@@ -34,8 +34,11 @@ class MethodChannelFlutterThermalPrinter extends FlutterThermalPrinterPlatform {
       methodChannel.invokeMethod('getUsbDevicesList');
 
   @override
-  Future<bool> connect(Printer device) async =>
-      await methodChannel.invokeMethod('connect', device.toJson());
+  Future<bool> connect(Printer device, {bool allowTakeover = true}) async =>
+      await methodChannel.invokeMethod('connect', {
+        ...device.toJson(),
+        'allowTakeover': allowTakeover,
+      });
 
   @override
   Future<PrintResult> printText(

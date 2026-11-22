@@ -11,6 +11,8 @@ class Printer extends BleDevice {
     this.isConnected,
     this.vendorId,
     this.productId,
+    this.isPrinterClass,
+    this.isInUseBySystem,
   }) : super(deviceId: address ?? '', name: name ?? '');
 
   /// Create Printer from JSON with validation
@@ -24,6 +26,8 @@ class Printer extends BleDevice {
         isConnected: json['isConnected'] as bool?,
         vendorId: json['vendorId']?.toString(),
         productId: json['productId']?.toString(),
+        isPrinterClass: json['isPrinterClass'] as bool?,
+        isInUseBySystem: json['isInUseBySystem'] as bool?,
       );
     } catch (e) {
       throw FormatException('Invalid Printer JSON format: $e');
@@ -39,6 +43,16 @@ class Printer extends BleDevice {
   final String? vendorId;
   final String? productId;
 
+  /// USB only: whether the device declares the USB printer class (7). Null when
+  /// unknown (non-USB, or an older native side). Vendor-class printers report
+  /// false yet print normally — use this only as a preference, never a gate.
+  final bool? isPrinterClass;
+
+  /// USB only: an Android driver owns this device and the app did not allow a
+  /// takeover (e.g. a USB network adapter). It is left alone — never opened,
+  /// polled or auto-selected — until re-plugged or explicitly connected.
+  final bool? isInUseBySystem;
+
   /// Convert to JSON with proper formatting
   Map<String, dynamic> toJson() {
     final data = <String, dynamic>{};
@@ -49,6 +63,8 @@ class Printer extends BleDevice {
     data['isConnected'] = isConnected;
     data['vendorId'] = vendorId;
     data['productId'] = productId;
+    data['isPrinterClass'] = isPrinterClass;
+    data['isInUseBySystem'] = isInUseBySystem;
 
     return data;
   }
@@ -75,6 +91,8 @@ class Printer extends BleDevice {
     bool? isConnected,
     String? vendorId,
     String? productId,
+    bool? isPrinterClass,
+    bool? isInUseBySystem,
   }) =>
       Printer(
         address: address ?? this.address,
@@ -83,6 +101,8 @@ class Printer extends BleDevice {
         isConnected: isConnected ?? this.isConnected,
         vendorId: vendorId ?? this.vendorId,
         productId: productId ?? this.productId,
+        isPrinterClass: isPrinterClass ?? this.isPrinterClass,
+        isInUseBySystem: isInUseBySystem ?? this.isInUseBySystem,
       );
 
   /// Generate unique identifier for the printer

@@ -27,7 +27,11 @@ abstract class FlutterThermalPrinterPlatform extends PlatformInterface {
     throw UnimplementedError('startScan() has not been implemented.');
   }
 
-  Future<bool> connect(Printer device) {
+  /// [allowTakeover] (USB/Android): whether the plugin may detach an Android
+  /// driver that currently owns the device. Devices declaring the USB printer
+  /// class are always taken over; for others, pass false to leave a device the
+  /// system is using (e.g. a USB network adapter) alone.
+  Future<bool> connect(Printer device, {bool allowTakeover = true}) {
     throw UnimplementedError('connect() has not been implemented.');
   }
 
